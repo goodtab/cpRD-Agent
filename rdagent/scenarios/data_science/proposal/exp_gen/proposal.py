@@ -1,4 +1,5 @@
 import json
+from datetime import timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -15,6 +16,7 @@ from rdagent.components.coder.data_science.workflow.exp import WorkflowTask
 from rdagent.core.proposal import ExpGen
 from rdagent.core.scenario import Scenario
 from rdagent.log import rdagent_logger as logger
+from rdagent.log.timer import RD_Agent_TIMER_wrapper
 from rdagent.oai.llm_utils import APIBackend, md5_hash
 from rdagent.scenarios.data_science.dev.feedback import ExperimentFeedback
 from rdagent.scenarios.data_science.experiment.experiment import DSExperiment
@@ -472,6 +474,43 @@ class DSProposalV2ExpGen(ExpGen):
         super().__init__(*args, **kwargs)
         self.supports_response_schema = APIBackend().supports_response_schema()
 
+    def get_timer_info(self) -> Tuple[bool, Optional[Tuple[float, float, float]]]:
+        """
+        Get timer information for time-aware selection.
+
+        Returns:
+            Tuple containing:
+            - timer_started (bool): Whether the timer has been started
+            - time_info (Optional[Tuple[float, float, float]]):
+              If timer is started, returns (total_seconds, remaining_seconds, time_ratio)
+              If timer is not started, returns None
+        """
+        # Get timer information for time-aware selection
+        timer = RD_Agent_TIMER_wrapper.timer
+        total_time = timer.all_duration if timer.all_duration else timedelta(0)
+        remaining_time = timer.remain_time() if timer.remain_time() else timedelta(0)
+        timer_started = timer.started
+
+        time_info = None
+        if timer_started:
+            total_time_val = total_time if total_time else timedelta(0)
+            remaining_time_val = remaining_time if remaining_time else timedelta(0)
+            # Convert to seconds
+            total_seconds = total_time_val.total_seconds()
+            remaining_seconds = remaining_time_val.total_seconds()
+            # Calculate time ratio (remaining/total)
+            time_ratio = remaining_seconds / total_seconds if total_seconds > 0 else 0
+            time_info = (total_seconds, remaining_seconds, time_ratio)
+            logger.info(
+                f"Time status enabled. Total Time: {total_seconds}s, Remaining Time: {remaining_seconds}s, Remaining Time Ratio: {time_ratio:.2f}"
+            )
+        else:
+            logger.warning(
+                f"Time status not enabled. If you don't set timeout, the LLM will not be aware of the time limit and would run indefinitely."
+            )
+
+        return timer_started, time_info
+
     def identify_scenario_problem(
         self,
         scenario_desc: str,
@@ -661,6 +700,8 @@ class DSProposalV2ExpGen(ExpGen):
         """
         Critique the generated hypotheses, identifying flaws and suggesting improvements.
         """
+        timer_started, time_info = self.get_timer_info()
+
         hypotheses_formatted = ""
         for i, (problem_name, hypothesis_data) in enumerate(hypothesis_dict.items()):
 
@@ -672,6 +713,8 @@ class DSProposalV2ExpGen(ExpGen):
             hypotheses_formatted += f"**Reason:** {hypothesis_data.get('reason', 'Not provided')}\n\n"
 
         sys_prompt = T(".prompts_v2:hypothesis_critique.system").r(
+            enable_time=timer_started,
+            time_info=time_info,
             critique_output_format=T(".prompts_v2:output_format.critique").r(),
         )
         user_prompt = T(".prompts_v2:hypothesis_critique.user").r(
@@ -731,6 +774,8 @@ class DSProposalV2ExpGen(ExpGen):
         Generate improved hypotheses based on critique feedback for each original hypothesis.
         Returns a dict with the same keys as hypothesis_dict, containing improved versions.
         """
+        timer_started, time_info = self.get_timer_info()
+
         hypothesis_critique_pairs = ""
         for i, problem_name in enumerate(hypothesis_dict.keys()):
             hypothesis_data = hypothesis_dict[problem_name]
@@ -743,6 +788,8 @@ class DSProposalV2ExpGen(ExpGen):
             hypothesis_critique_pairs += f"**Critique:** {critique_data.get('critique', 'No critique available')}\n\n"
 
         sys_prompt = T(".prompts_v2:hypothesis_rewrite.system").r(
+            enable_time=timer_started,
+            time_info=time_info,
             rewrite_output_format=T(".prompts_v2:output_format.rewrite").r(),
         )
         user_prompt = T(".prompts_v2:hypothesis_rewrite.user").r(
